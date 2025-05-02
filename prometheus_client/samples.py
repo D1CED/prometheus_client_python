@@ -67,7 +67,7 @@ class Exemplar(NamedTuple):
 class Sample(NamedTuple):
     name: str
     labels: Dict[str, str]
-    value: float
+    value: Optional[float] = None
     timestamp: Optional[Union[float, Timestamp]] = None
     exemplar: Optional[Exemplar] = None
     native_histogram: Optional[NativeHistogram] = None

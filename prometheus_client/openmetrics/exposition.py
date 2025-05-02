@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 
+from ..samples import NativeHistogram
 from ..utils import floatToGoString
 from ..validation import (
     _is_valid_legacy_labelname, _is_valid_legacy_metric_name,
@@ -8,6 +9,8 @@ from ..validation import (
 
 CONTENT_TYPE_LATEST = 'application/openmetrics-text; version=1.0.0; charset=utf-8'
 """Content type of the latest OpenMetrics text format"""
+
+CONTENT_TYPE_NH = 'application/openmetrics-text; version=1.1.0-nativehistogram.*; charset=utf-8'
 
 
 def _is_valid_exemplar_metric(metric, sample):
@@ -20,7 +23,7 @@ def _is_valid_exemplar_metric(metric, sample):
     return False
 
 
-def generate_latest(registry):
+def generate_latest(registry, allow_native_histograms=False):
     '''Returns the metrics from the registry in latest text format as a string.'''
     output = []
     for metric in registry.collect():
@@ -32,6 +35,8 @@ def generate_latest(registry):
             if metric.unit:
                 output.append(f'# UNIT {escape_metric_name(mname)} {metric.unit}\n')
             for s in metric.samples:
+                if s.native_histogram is not None and not allow_native_histograms:
+                    continue
                 if not _is_valid_legacy_metric_name(s.name):
                     labelstr = escape_metric_name(s.name)
                     if s.labels:
@@ -71,18 +76,27 @@ def generate_latest(registry):
                 timestamp = ''
                 if s.timestamp is not None:
                     timestamp = f' {s.timestamp}'
+
+                value = None
+                if s.value is not None:
+                    value = floatToGoString(s.value)
+                elif s.native_histogram is not None:
+                    value = native_histogram_as_str(s.native_histogram)
+                else:
+                    raise ValueError('sample must hold float or native_histogram')
+
                 if _is_valid_legacy_metric_name(s.name):
                     output.append('{}{} {}{}{}\n'.format(
                         s.name,
                         labelstr,
-                        floatToGoString(s.value),
+                        value,
                         timestamp,
                         exemplarstr,
                     ))
                 else:
                     output.append('{} {}{}{}\n'.format(
                         labelstr,
-                        floatToGoString(s.value),
+                        value,
                         timestamp,
                         exemplarstr,
                     ))
@@ -92,6 +106,28 @@ def generate_latest(registry):
 
     output.append('# EOF\n')
     return ''.join(output).encode('utf-8')
+
+
+def generate_nh(registry):
+    return generate_latest(registry, allow_native_histograms=True)
+
+
+def native_histogram_as_str(native_histogram: NativeHistogram) -> str:
+    nh_sum = floatToGoString(native_histogram.sum_value)
+    nh_count = int(native_histogram.count_value)
+    nh_schema = native_histogram.schema
+    nh_zero_threshold = floatToGoString(native_histogram.zero_threshold)
+    nh_zero_count = int(native_histogram.zero_count)
+
+    nh_pos_spans = ''
+    if native_histogram.pos_spans:
+        nh_pos_spans = ','.join(f'{span.offset}:{span.length}' for span in native_histogram.pos_spans)
+
+    nh_pos_deltas = ''
+    if native_histogram.pos_deltas:
+        nh_pos_deltas = ','.join(map(str, native_histogram.pos_deltas))
+
+    return f'{{sum:{nh_sum},count:{nh_count},schema:{nh_schema},zero_threshold:{nh_zero_threshold},zero_count:{nh_zero_count},positive_spans:[{nh_pos_spans}],positive_deltas:[{nh_pos_deltas}]}}'
 
 
 def escape_metric_name(s: str) -> str:

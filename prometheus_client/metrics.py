@@ -1,3 +1,4 @@
+from math import floor, log2
 import os
 from threading import Lock
 import time
@@ -555,12 +556,32 @@ class Histogram(MetricWrapperBase):
         with REQUEST_TIME.time():
             pass  # Logic to be timed
 
+    There are two kinds of histograms: classic and native. A Histogram object can be both.
+
+    For classic histograms you can configure buckets.
+
     The default buckets are intended to cover a typical web/rpc request from milliseconds to seconds.
     They can be overridden by passing `buckets` keyword argument to `Histogram`.
+
+    For native histograms you can set a schema, the maximum count of populated
+    buckets, a reset timer and a zero threshold.
+
+    The schema is set indirectly by the `nh_bucket_factor` which determines how much larger the
+    next higher bucket is compared to a chosen one. It must be a float greater than one.
+
+    If one more than the maximum number of populated buckets is filled excluding the zero bucket
+    the histogram is reset except if the duration since the last reset is less than the reset time.
+    In this case the resolution of the histogram is reduced.
+    In case the resultion was reduced as soon as the reset time is reached since the last reset
+    the histogram is reset to its initial schema.
     """
     _type = 'histogram'
     _reserved_labelnames = ['le']
     DEFAULT_BUCKETS = (.005, .01, .025, .05, .075, .1, .25, .5, .75, 1.0, 2.5, 5.0, 7.5, 10.0, INF)
+    DEFAULT_BUCKET_FACTOR = 1.1
+    DEFAULT_MIN_RESET_DURATION_SECONDS = 10 * 60
+    DEFAULT_MAX_POPULATED_BUCKETS = 100
+    DEFAULT_ZERO_THRESHOLD = 1 / 2**2**4
 
     def __init__(self,
                  name: str,
@@ -572,8 +593,38 @@ class Histogram(MetricWrapperBase):
                  registry: Optional[CollectorRegistry] = REGISTRY,
                  _labelvalues: Optional[Sequence[str]] = None,
                  buckets: Sequence[Union[float, str]] = DEFAULT_BUCKETS,
+                 *,
+                 classic: bool = True,
+                 native: bool = False,
+                 nh_bucket_factor: float = DEFAULT_BUCKET_FACTOR,
+                 nh_max_populated_buckets: int = DEFAULT_MAX_POPULATED_BUCKETS,
+                 nh_min_reset_duration_seconds: int = DEFAULT_MIN_RESET_DURATION_SECONDS,
+                 nh_zero_threshold: float = DEFAULT_ZERO_THRESHOLD,
                  ):
-        self._prepare_buckets(buckets)
+        if not (classic or native):
+            raise ValueError('Histogram must be classic or native or both')
+
+        if classic:
+            self._upper_bounds = self._prepare_buckets(buckets)
+
+        if native:
+            if nh_bucket_factor <= 1:
+                raise ValueError('native_histogram_bucket_factor must be greater than one')
+            if nh_min_reset_duration_seconds <= 0:
+                raise ValueError('min_reset_duration_seconds must be positive')
+            if nh_zero_threshold is not None and nh_zero_threshold < 0:
+                raise ValueError('zero_threshold must be non-negative or None')
+            if values.ValueClass._multiprocess:
+                raise ValueError('native histograms are only supported in threaded mode')
+
+            self._nh_bucket_factor = nh_bucket_factor
+            self._nh_max_populated_buckets = nh_max_populated_buckets
+            self._nh_min_reset_duration_seconds = nh_min_reset_duration_seconds
+            self._nh_zero_threshold = nh_zero_threshold
+
+        self._is_classic_histogram = classic
+        self._is_native_histogram = native
+
         super().__init__(
             name=name,
             documentation=documentation,
@@ -584,9 +635,17 @@ class Histogram(MetricWrapperBase):
             registry=registry,
             _labelvalues=_labelvalues,
         )
-        self._kwargs['buckets'] = buckets
 
-    def _prepare_buckets(self, source_buckets: Sequence[Union[float, str]]) -> None:
+        self._kwargs['buckets'] = buckets
+        self._kwargs['classic'] = classic
+        self._kwargs['native'] = native
+        self._kwargs['nh_bucket_factor'] = nh_bucket_factor
+        self._kwargs['nh_max_populated_buckets'] = nh_max_populated_buckets
+        self._kwargs['nh_min_reset_duration_seconds'] = nh_min_reset_duration_seconds
+        self._kwargs['nh_zero_threshold'] = nh_zero_threshold
+
+    @staticmethod
+    def _prepare_buckets(source_buckets: Sequence[Union[float, str]]) -> Sequence[float]:
         buckets = [float(b) for b in source_buckets]
         if buckets != sorted(buckets):
             # This is probably an error on the part of the user,
@@ -596,21 +655,37 @@ class Histogram(MetricWrapperBase):
             buckets.append(INF)
         if len(buckets) < 2:
             raise ValueError('Must have at least two buckets')
-        self._upper_bounds = buckets
+        return buckets
+
+    @staticmethod
+    def _choose_schema_from_bucket_factor(bucket_factor: float) -> int:
+        schema = -floor(log2(log2(bucket_factor)))
+        return max(min(schema, 8), -4)
 
     def _metric_init(self) -> None:
-        self._buckets: List[values.ValueClass] = []
         self._created = time.time()
-        bucket_labelnames = self._labelnames + ('le',)
-        self._sum = values.ValueClass(self._type, self._name, self._name + '_sum', self._labelnames, self._labelvalues, self._documentation)
-        for b in self._upper_bounds:
-            self._buckets.append(values.ValueClass(
-                self._type,
-                self._name,
-                self._name + '_bucket',
-                bucket_labelnames,
-                self._labelvalues + (floatToGoString(b),),
-                self._documentation)
+
+        if self._is_classic_histogram:
+            self._buckets: List[values.ValueClass] = []
+            bucket_labelnames = self._labelnames + ('le',)
+            self._sum = values.ValueClass(self._type, self._name, self._name + '_sum', self._labelnames, self._labelvalues, self._documentation)
+            for b in self._upper_bounds:
+                self._buckets.append(values.ValueClass(
+                    self._type,
+                    self._name,
+                    self._name + '_bucket',
+                    bucket_labelnames,
+                    self._labelvalues + (floatToGoString(b),),
+                    self._documentation)
+                )
+
+        if self._is_native_histogram:
+            schema = self._choose_schema_from_bucket_factor(self._nh_bucket_factor)
+            self._native_histogram = values.ThreadSafeNativeHistogram(
+                schema=schema,
+                zero_threshold=self._nh_zero_threshold,
+                max_populated_buckets=self._nh_max_populated_buckets,
+                min_reset_duration_seconds=self._nh_min_reset_duration_seconds,
             )
 
     def observe(self, amount: float, exemplar: Optional[Dict[str, str]] = None) -> None:
@@ -624,14 +699,19 @@ class Histogram(MetricWrapperBase):
         for details.
         """
         self._raise_if_not_observable()
-        self._sum.inc(amount)
-        for i, bound in enumerate(self._upper_bounds):
-            if amount <= bound:
-                self._buckets[i].inc(1)
-                if exemplar:
-                    _validate_exemplar(exemplar)
-                    self._buckets[i].set_exemplar(Exemplar(exemplar, amount, time.time()))
-                break
+
+        if self._is_classic_histogram:
+            self._sum.inc(amount)
+            for i, bound in enumerate(self._upper_bounds):
+                if amount <= bound:
+                    self._buckets[i].inc(1)
+                    if exemplar:
+                        _validate_exemplar(exemplar)
+                        self._buckets[i].set_exemplar(Exemplar(exemplar, amount, time.time()))
+                    break
+
+        if self._is_native_histogram:
+            self._native_histogram.add_observation(amount)
 
     def time(self) -> Timer:
         """Time a block of code or function, and observe the duration in seconds.
@@ -642,15 +722,23 @@ class Histogram(MetricWrapperBase):
 
     def _child_samples(self) -> Iterable[Sample]:
         samples = []
-        acc = 0.0
-        for i, bound in enumerate(self._upper_bounds):
-            acc += self._buckets[i].get()
-            samples.append(Sample('_bucket', {'le': floatToGoString(bound)}, acc, None, self._buckets[i].get_exemplar()))
-        samples.append(Sample('_count', {}, acc, None, None))
-        if self._upper_bounds[0] >= 0:
-            samples.append(Sample('_sum', {}, self._sum.get(), None, None))
+
+        # must come first
+        if self._is_native_histogram:
+            samples.append(Sample('', {}, native_histogram=self._native_histogram.extract()))
+
+        if self._is_classic_histogram:
+            acc = 0.0
+            for i, bound in enumerate(self._upper_bounds):
+                acc += self._buckets[i].get()
+                samples.append(Sample('_bucket', {'le': floatToGoString(bound)}, acc, None, self._buckets[i].get_exemplar()))
+            samples.append(Sample('_count', {}, acc, None, None))
+            if self._upper_bounds[0] >= 0:
+                samples.append(Sample('_sum', {}, self._sum.get(), None, None))
+
         if _use_created:
             samples.append(Sample('_created', {}, self._created, None, None))
+
         return tuple(samples)
 
 

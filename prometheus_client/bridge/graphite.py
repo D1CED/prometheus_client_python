@@ -82,7 +82,8 @@ class GraphiteBridge:
                             for k, v in sorted(s.labels.items())])
                 else:
                     labelstr = ''
-                output.append(f'{prefixstr}{_sanitize(s.name)}{labelstr} {float(s.value)} {now}\n')
+                if s.value is not None:
+                    output.append(f'{prefixstr}{_sanitize(s.name)}{labelstr} {float(s.value)} {now}\n')
 
         conn = socket.create_connection(self._address, self._timeout)
         conn.sendall(''.join(output).encode('ascii'))

@@ -32,7 +32,7 @@ class Metric:
         self.type: str = typ
         self.samples: List[Sample] = []
 
-    def add_sample(self, name: str, labels: Dict[str, str], value: float, timestamp: Optional[Union[Timestamp, float]] = None, exemplar: Optional[Exemplar] = None, native_histogram: Optional[NativeHistogram] = None) -> None:
+    def add_sample(self, name: str, labels: Dict[str, str], value: Optional[float] = None, timestamp: Optional[Union[Timestamp, float]] = None, exemplar: Optional[Exemplar] = None, native_histogram: Optional[NativeHistogram] = None) -> None:
         """Add a sample to the metric.
 
         Internal-only, do not use."""

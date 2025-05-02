@@ -7,7 +7,9 @@ from prometheus_client.core import (
     InfoMetricFamily, Metric, NativeHistogram, Sample, StateSetMetricFamily,
     SummaryMetricFamily, Timestamp,
 )
-from prometheus_client.openmetrics.exposition import generate_latest
+from prometheus_client.openmetrics.exposition import (
+    generate_latest, native_histogram_as_str,
+)
 from prometheus_client.openmetrics.parser import text_string_to_metric_families
 
 
@@ -327,6 +329,15 @@ hist_w_classic_two_sets_sum{foo="baz"} 100
         hfm.add_sample("hist_w_classic_two_sets_count", {"foo": "baz"}, 24.0, None, None, None)
         hfm.add_sample("hist_w_classic_two_sets_sum", {"foo": "baz"}, 100.0, None, None, None)
         self.assertEqual([hfm], families)
+
+    def test_native_generate_parse(self):
+        nh = NativeHistogram(count_value=0, sum_value=0.0, schema=0, zero_threshold=0.01, zero_count=0)
+        nhs = native_histogram_as_str(nh)
+        nhs = '# TYPE example histogram\n# HELP example help text\nexample ' + nhs + '\n# EOF\n'
+        families = list(text_string_to_metric_families(nhs))
+        metric = Metric(name='example', documentation='help text', typ='histogram')
+        metric.add_sample(name='example', labels=None, native_histogram=nh)
+        self.assertEqual([metric], families)
 
     def test_simple_gaugehistogram(self):
         families = text_string_to_metric_families("""# TYPE a gaugehistogram

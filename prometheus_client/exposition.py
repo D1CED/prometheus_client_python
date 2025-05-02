@@ -317,9 +317,12 @@ def generate_latest(registry: CollectorRegistry = REGISTRY) -> bytes:
 def choose_encoder(accept_header: str) -> Tuple[Callable[[CollectorRegistry], bytes], str]:
     accept_header = accept_header or ''
     for accepted in accept_header.split(','):
-        if accepted.split(';')[0].strip() == 'application/openmetrics-text':
-            return (openmetrics.generate_latest,
-                    openmetrics.CONTENT_TYPE_LATEST)
+        mime_type, *specifiers = map(str.strip, accepted.split(';'))
+        if mime_type == 'application/openmetrics-text':
+            if 'version=1.1.0-nativehistogram.*' in specifiers:
+                return openmetrics.generate_nh, openmetrics.CONTENT_TYPE_NH
+            else:
+                return openmetrics.generate_latest, openmetrics.CONTENT_TYPE_LATEST
     return generate_latest, CONTENT_TYPE_LATEST
 
 

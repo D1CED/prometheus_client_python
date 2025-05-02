@@ -1,3 +1,4 @@
+import math
 import time
 import unittest
 
@@ -7,7 +8,9 @@ from prometheus_client import (
 from prometheus_client.core import (
     Exemplar, GaugeHistogramMetricFamily, Timestamp,
 )
-from prometheus_client.openmetrics.exposition import generate_latest
+from prometheus_client.openmetrics.exposition import (
+    generate_latest, generate_nh,
+)
 
 
 class TestGenerateText(unittest.TestCase):
@@ -129,6 +132,170 @@ hh_sum 8.0
 hh_created 123.456
 # EOF
 """, generate_latest(self.registry))
+
+    def test_hybrid_histogram_native_suppressed(self):
+        s = Histogram('hh', 'A histogram', registry=self.registry, native=True)
+        s.observe(0.05)
+        self.assertEqual(b"""# HELP hh A histogram
+# TYPE hh histogram
+hh_bucket{le="0.005"} 0.0
+hh_bucket{le="0.01"} 0.0
+hh_bucket{le="0.025"} 0.0
+hh_bucket{le="0.05"} 1.0
+hh_bucket{le="0.075"} 1.0
+hh_bucket{le="0.1"} 1.0
+hh_bucket{le="0.25"} 1.0
+hh_bucket{le="0.5"} 1.0
+hh_bucket{le="0.75"} 1.0
+hh_bucket{le="1.0"} 1.0
+hh_bucket{le="2.5"} 1.0
+hh_bucket{le="5.0"} 1.0
+hh_bucket{le="7.5"} 1.0
+hh_bucket{le="10.0"} 1.0
+hh_bucket{le="+Inf"} 1.0
+hh_count 1.0
+hh_sum 0.05
+hh_created 123.456
+# EOF
+""", generate_latest(self.registry))
+
+    def test_hybrid_histogram(self):
+        s = Histogram('hh', 'A histogram', registry=self.registry, native=True)
+        s.observe(0.05)
+        self.assertEqual(b"""# HELP hh A histogram
+# TYPE hh histogram
+hh {sum:0.05,count:1,schema:3,zero_threshold:1.52587890625e-05,zero_count:0,positive_spans:[-35:1],positive_deltas:[1]}
+hh_bucket{le="0.005"} 0.0
+hh_bucket{le="0.01"} 0.0
+hh_bucket{le="0.025"} 0.0
+hh_bucket{le="0.05"} 1.0
+hh_bucket{le="0.075"} 1.0
+hh_bucket{le="0.1"} 1.0
+hh_bucket{le="0.25"} 1.0
+hh_bucket{le="0.5"} 1.0
+hh_bucket{le="0.75"} 1.0
+hh_bucket{le="1.0"} 1.0
+hh_bucket{le="2.5"} 1.0
+hh_bucket{le="5.0"} 1.0
+hh_bucket{le="7.5"} 1.0
+hh_bucket{le="10.0"} 1.0
+hh_bucket{le="+Inf"} 1.0
+hh_count 1.0
+hh_sum 0.05
+hh_created 123.456
+# EOF
+""", generate_nh(self.registry))
+
+    def test_native_histogram(self):
+        s = Histogram('hh', 'A histogram', registry=self.registry, classic=False, native=True)
+        s.observe(0.5)
+        s.observe(1.5)
+        s.observe(0.5)
+        s.observe(2.5)
+        s.observe(0.5)
+        s.observe(3.5)
+        s.observe(0.5)
+        s.observe(0.0)
+        s.observe(3.6)
+        s.observe(3.9)
+        print(generate_nh(self.registry))
+        self.assertEqual(b"""# HELP hh A histogram
+# TYPE hh histogram
+hh {sum:17.0,count:10,schema:3,zero_threshold:1.52587890625e-05,zero_count:1,positive_spans:[-9:1,12:1,5:1,3:2],positive_deltas:[4,-3,0,1,-1]}
+hh_created 123.456
+# EOF
+""", generate_nh(self.registry))
+
+    def test_native_histogram_bucket_boundaries(self):
+        """
+        Let base be `2**2**-schema`.
+        In OTel the i-th bucket is of the shape `( base**i, base**(i+1) ]`.
+
+        See: https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponential-buckets
+        """
+        s = Histogram('hh', 'A histogram', registry=self.registry, classic=False, native=True)
+
+        s.observe(math.nextafter(1, -math.inf))
+        s.observe(1)
+
+        s.observe(math.nextafter(1, math.inf))
+        s.observe(1.09050)
+        s.observe(math.nextafter(2**2**-3, -math.inf))
+
+        # The boundary is at 2**2**-3 == 1.0905077326652577
+        # which due to rounding issues falls into the next bucket.
+        s.observe(2**2**-3)
+
+        s.observe(1.09051)
+        s.observe(1.09052)
+
+        s.observe(math.nextafter(2, -math.inf))
+        s.observe(2)
+
+        s.observe(math.nextafter(2, math.inf))
+        s.observe(math.nextafter(math.nextafter(2, math.inf), math.inf))
+
+        # Expected result is (bucket:count)     -1:2 0:4 1:2 7:2 8:2
+        # but because of rounding errors we get -1:2 0:3 1:3 7:2 8:2
+
+        print(generate_nh(self.registry))
+        self.assertEqual(b"""# HELP hh A histogram
+# TYPE hh histogram
+hh {sum:16.452545465330516,count:12,schema:3,zero_threshold:1.52587890625e-05,zero_count:0,positive_spans:[-1:3,5:2],positive_deltas:[2,1,0,-1,0]}
+hh_created 123.456
+# EOF
+""", generate_nh(self.registry))
+
+    def test_native_histogram_resolution_shrink(self):
+        s3 = Histogram('hh3', 'A histogram scale 3 reduced to 2', registry=self.registry, classic=False, native=True, nh_max_populated_buckets=50)
+        s2 = Histogram('hh2', 'A histogram scale 2', registry=self.registry, classic=False, native=True, nh_bucket_factor=1.2)
+
+        # test negative buckets
+        s2.observe(0.5)
+        s2.observe(0.51)
+        s3.observe(0.5)
+        s3.observe(0.51)
+
+        for i in range(500):
+            s2.observe(i)
+            s3.observe(i)
+
+        print(generate_nh(self.registry))
+        self.assertEqual(b"""# HELP hh3 A histogram scale 3 reduced to 2
+# TYPE hh3 histogram
+hh3 {sum:124751.01000000001,count:502,schema:2,zero_threshold:1.52587890625e-05,zero_count:1,positive_spans:[-5:2,2:1,3:1,2:2,1:27],positive_deltas:[1,0,0,0,0,0,0,0,1,-1,1,0,1,0,0,1,2,0,1,1,3,1,2,3,4,3,5,5,7,7,10,10,1]}
+hh3_created 123.456
+# HELP hh2 A histogram scale 2
+# TYPE hh2 histogram
+hh2 {sum:124751.01000000001,count:502,schema:2,zero_threshold:1.52587890625e-05,zero_count:1,positive_spans:[-5:2,2:1,3:1,2:2,1:27],positive_deltas:[1,0,0,0,0,0,0,0,1,-1,1,0,1,0,0,1,2,0,1,1,3,1,2,3,4,3,5,5,7,7,10,10,1]}
+hh2_created 123.456
+# EOF
+""", generate_nh(self.registry))
+
+    def test_native_histogram_reset(self):
+        s = Histogram('hh', 'A histogram', registry=self.registry, classic=False, native=True, nh_min_reset_duration_seconds=1, nh_max_populated_buckets=50)
+        for i in range(500):
+            s.observe(i)
+        time.sleep(1.01)
+        s.observe(2)
+        print(generate_nh(self.registry))
+        self.assertEqual(b"""# HELP hh A histogram
+# TYPE hh histogram
+hh {sum:2.0,count:1,schema:3,zero_threshold:1.52587890625e-05,zero_count:0,positive_spans:[7:1],positive_deltas:[1]}
+hh_created 123.456
+# EOF
+""", generate_nh(self.registry))
+
+    def test_native_histogram_zero_threshold(self):
+        s = Histogram('hh', 'A histogram', registry=self.registry, classic=False, native=True, nh_zero_threshold=0.5)
+        s.observe(0.5)
+        print(generate_nh(self.registry))
+        self.assertEqual(b"""# HELP hh A histogram
+# TYPE hh histogram
+hh {sum:0.5,count:1,schema:3,zero_threshold:0.5,zero_count:1,positive_spans:[],positive_deltas:[]}
+hh_created 123.456
+# EOF
+""", generate_nh(self.registry))
 
     def test_counter_exemplar(self):
         c = Counter('cc', 'A counter', registry=self.registry)

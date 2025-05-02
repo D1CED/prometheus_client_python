@@ -7,10 +7,11 @@ import pytest
 
 from prometheus_client import metrics
 from prometheus_client.core import (
-    CollectorRegistry, Counter, CounterMetricFamily, Enum, Gauge,
+    BucketSpan, CollectorRegistry, Counter, CounterMetricFamily, Enum, Gauge,
     GaugeHistogramMetricFamily, GaugeMetricFamily, Histogram,
-    HistogramMetricFamily, Info, InfoMetricFamily, Metric, Sample,
-    StateSetMetricFamily, Summary, SummaryMetricFamily, UntypedMetricFamily,
+    HistogramMetricFamily, Info, InfoMetricFamily, Metric, NativeHistogram,
+    Sample, StateSetMetricFamily, Summary, SummaryMetricFamily,
+    UntypedMetricFamily,
 )
 from prometheus_client.decorator import getargspec
 from prometheus_client.metrics import _get_use_created
@@ -525,6 +526,23 @@ class TestHistogram(unittest.TestCase):
             'zyxwvutsrqponmlkjihgfedcba': '26+16 characters',
             'y123456': '7+15 characters',
         })
+
+
+class TestNativeHistogram(unittest.TestCase):
+    def setUp(self):
+        self.registry = CollectorRegistry()
+        self.histogram = Histogram('h', 'help', registry=self.registry, native=True)
+        self.labels = Histogram('hl', 'help', ['l'], registry=self.registry, native=True)
+        self.empty_histogram = NativeHistogram(0, 0.0, 3, 1 / 2**2**4, 0, None, None, None, None)
+
+    def test_native_histogram(self):
+        empty = self.empty_histogram._replace(pos_spans=[], pos_deltas=[])
+        self.assertEqual(empty, self.registry.get_sample_value('h'))
+
+    def test_labels(self):
+        self.labels.labels('a').observe(2)
+        want = self.empty_histogram._replace(sum_value=2.0, count_value=1, pos_spans=[BucketSpan(7, 1)], pos_deltas=[1])
+        self.assertEqual(want, self.registry.get_sample_value('hl', {'l': 'a'}))
 
 
 class TestInfo(unittest.TestCase):
